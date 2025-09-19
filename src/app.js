@@ -1,70 +1,24 @@
 const express = require('express');
 const cors = require('cors');
-const helmet = require('helmet');
-const morgan = require('morgan');
-const compression = require('compression');
-const rateLimit = require('express-rate-limit');
+const { Client } = require('pg');
 require('dotenv').config();
-
-const { testConnection, sequelize } = require('./config/database');
-const config = require('./config/config');
-const routes = require('./routes');
-const { errorHandler, notFound } = require('./middleware/errorHandler');
 
 const app = express();
 
-// Security middleware
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" }
-}));
+// Middleware básico
+app.use(cors());
+app.use(express.json());
 
-// CORS configuration
-app.use(cors({
-  origin: [
-    config.corsOrigin,
-    'http://localhost:3000',
-    'http://127.0.0.1:3000'
-  ],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-}));
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: config.rateLimit.windowMs,
-  max: config.rateLimit.max,
-  message: {
-    success: false,
-    error: {
-      message: 'Too many requests from this IP, please try again later.',
-      type: 'RATE_LIMIT_EXCEEDED'
-    }
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use(limiter);
-
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Compression middleware
-app.use(compression());
-
-// Logging middleware
-if (config.nodeEnv === 'development') {
-  app.use(morgan('dev'));
-} else {
-  app.use(morgan('combined'));
-}
-
-// Request logging middleware
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  next();
-});
+// Función para conectar a la BD
+const connectDB = () => {
+  return new Client({
+    host: process.env.DB_HOST || 'localhost',
+    port: process.env.DB_PORT || 5432,
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME || 'zurich_todo_db'
+  });
+};
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -73,94 +27,357 @@ app.get('/', (req, res) => {
     message: 'Welcome to Zurich Todo API',
     version: '1.0.0',
     endpoints: {
-      health: '/api/health',
-      info: '/api/info',
-      tasks: '/api/tasks'
+      'GET /api/tasks': 'Get all tasks',
+      'POST /api/tasks': 'Create new task',
+      'PUT /api/tasks/:id': 'Update task',
+      'DELETE /api/tasks/:id': 'Delete task',
+      'GET /api/tasks/stats': 'Get statistics'
     },
-    documentation: 'Visit /api/info for detailed API documentation',
     timestamp: new Date().toISOString()
   });
 });
 
-// API routes
-app.use('/api', routes);
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'API is running successfully',
+    timestamp: new Date().toISOString()
+  });
+});
 
-// Handle 404 errors
-app.use(notFound);
-
-// Global error handler (must be last)
-app.use(errorHandler);
-
-// Database connection and server startup
-const startServer = async () => {
+// Get all tasks
+app.get('/api/tasks', async (req, res) => {
+  const client = connectDB();
+  
   try {
-    // Test database connection
-    await testConnection();
+    await client.connect();
     
-    // Sync database models
-    if (config.nodeEnv === 'development') {
-      await sequelize.sync({ alter: true });
-      console.log('✅ Database models synchronized');
-    } else {
-      await sequelize.sync();
-    }
-
-    // Start server
-    const server = app.listen(config.port, () => {
-      console.log('\n' + '='.repeat(50));
-      console.log(`🚀 Server running on port ${config.port}`);
-      console.log(`📍 Environment: ${config.nodeEnv}`);
-      console.log(`🌐 API URL: http://localhost:${config.port}`);
-      console.log(`📚 API Documentation: http://localhost:${config.port}/api/info`);
-      console.log(`❤️  Health Check: http://localhost:${config.port}/api/health`);
-      console.log('='.repeat(50) + '\n');
+    const result = await client.query(`
+      SELECT 
+        t.*,
+        u.username,
+        u.first_name,
+        u.last_name
+      FROM tasks t
+      LEFT JOIN users u ON t.user_id = u.id
+      WHERE t.deleted_at IS NULL
+      ORDER BY t.created_at DESC
+    `);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        tasks: result.rows,
+        total: result.rows.length
+      },
+      message: 'Tasks retrieved successfully from database'
     });
-
-    // Graceful shutdown
-    const gracefulShutdown = (signal) => {
-      console.log(`\n${signal} received. Starting graceful shutdown...`);
-      server.close(async () => {
-        console.log('HTTP server closed.');
-        
-        try {
-          await sequelize.close();
-          console.log('Database connection closed.');
-        } catch (error) {
-          console.error('Error closing database connection:', error);
-        }
-        
-        console.log('Graceful shutdown completed.');
-        process.exit(0);
-      });
-    };
-
-    // Handle shutdown signals
-    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-    // Handle unhandled promise rejections
-    process.on('unhandledRejection', (err, promise) => {
-      console.error('Unhandled Promise Rejection:', err.message);
-      server.close(() => {
-        process.exit(1);
-      });
-    });
-
-    // Handle uncaught exceptions
-    process.on('uncaughtException', (err) => {
-      console.error('Uncaught Exception:', err.message);
-      process.exit(1);
-    });
-
+    
   } catch (error) {
-    console.error('❌ Failed to start server:', error.message);
-    process.exit(1);
+    console.error('Error fetching tasks:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to retrieve tasks',
+        details: error.message
+      }
+    });
+  } finally {
+    await client.end();
   }
-};
+});
 
-// Start the server
-if (require.main === module) {
-  startServer();
-}
+// Get task by ID
+app.get('/api/tasks/:id', async (req, res) => {
+  const client = connectDB();
+  const { id } = req.params;
+  
+  try {
+    await client.connect();
+    
+    const result = await client.query(`
+      SELECT 
+        t.*,
+        u.username,
+        u.first_name,
+        u.last_name
+      FROM tasks t
+      LEFT JOIN users u ON t.user_id = u.id
+      WHERE t.id = $1 AND t.deleted_at IS NULL
+    `, [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: 'Task not found',
+          details: `No task found with ID: ${id}`
+        }
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        task: result.rows[0]
+      },
+      message: 'Task retrieved successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error fetching task:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to retrieve task',
+        details: error.message
+      }
+    });
+  } finally {
+    await client.end();
+  }
+});
+
+// Get task stats
+app.get('/api/tasks/stats', async (req, res) => {
+  const client = connectDB();
+  
+  try {
+    await client.connect();
+    
+    const result = await client.query(`
+      SELECT 
+        COUNT(*) as total_tasks,
+        COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_tasks,
+        COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_tasks,
+        COUNT(CASE WHEN priority = 'high' THEN 1 END) as high_priority_tasks,
+        COUNT(CASE WHEN priority = 'medium' THEN 1 END) as medium_priority_tasks,
+        COUNT(CASE WHEN priority = 'low' THEN 1 END) as low_priority_tasks
+      FROM tasks 
+      WHERE deleted_at IS NULL
+    `);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        statistics: result.rows[0]
+      },
+      message: 'Statistics retrieved successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to retrieve statistics',
+        details: error.message
+      }
+    });
+  } finally {
+    await client.end();
+  }
+});
+
+// Create new task
+app.post('/api/tasks', async (req, res) => {
+  const client = connectDB();
+  const { title, description, status = 'pending', priority = 'medium', due_date, user_id } = req.body;
+  
+  if (!title) {
+    return res.status(400).json({
+      success: false,
+      error: {
+        message: 'Validation error',
+        details: 'Title is required'
+      }
+    });
+  }
+  
+  try {
+    await client.connect();
+    
+    const result = await client.query(`
+      INSERT INTO tasks (title, description, status, priority, due_date, user_id)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+    `, [title, description, status, priority, due_date, user_id]);
+    
+    res.status(201).json({
+      success: true,
+      data: {
+        task: result.rows[0]
+      },
+      message: 'Task created successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error creating task:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to create task',
+        details: error.message
+      }
+    });
+  } finally {
+    await client.end();
+  }
+});
+
+// Update task by ID
+app.put('/api/tasks/:id', async (req, res) => {
+  const client = connectDB();
+  const { id } = req.params;
+  const { title, description, status, priority, due_date } = req.body;
+  
+  try {
+    await client.connect();
+    
+    // Verificar que la tarea existe
+    const checkResult = await client.query(
+      'SELECT * FROM tasks WHERE id = $1 AND deleted_at IS NULL',
+      [id]
+    );
+    
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: 'Task not found',
+          details: `No task found with ID: ${id}`
+        }
+      });
+    }
+    
+    // Construir query dinámico para actualizar solo los campos enviados
+    const updateFields = [];
+    const values = [];
+    let paramCount = 1;
+    
+    if (title !== undefined) {
+      updateFields.push(`title = $${paramCount++}`);
+      values.push(title);
+    }
+    if (description !== undefined) {
+      updateFields.push(`description = $${paramCount++}`);
+      values.push(description);
+    }
+    if (status !== undefined) {
+      updateFields.push(`status = $${paramCount++}`);
+      values.push(status);
+      
+      // Si se marca como completada, agregar completed_at
+      if (status === 'completed') {
+        updateFields.push(`completed_at = NOW()`);
+      } else if (status === 'pending') {
+        updateFields.push(`completed_at = NULL`);
+      }
+    }
+    if (priority !== undefined) {
+      updateFields.push(`priority = $${paramCount++}`);
+      values.push(priority);
+    }
+    if (due_date !== undefined) {
+      updateFields.push(`due_date = $${paramCount++}`);
+      values.push(due_date);
+    }
+    
+    updateFields.push(`updated_at = NOW()`);
+    values.push(id);
+    
+    const query = `
+      UPDATE tasks 
+      SET ${updateFields.join(', ')} 
+      WHERE id = $${paramCount} AND deleted_at IS NULL
+      RETURNING *
+    `;
+    
+    const result = await client.query(query, values);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        task: result.rows[0]
+      },
+      message: 'Task updated successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error updating task:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to update task',
+        details: error.message
+      }
+    });
+  } finally {
+    await client.end();
+  }
+});
+
+// Delete task by ID
+app.delete('/api/tasks/:id', async (req, res) => {
+  const client = connectDB();
+  const { id } = req.params;
+  
+  try {
+    await client.connect();
+    
+    // Verificar que la tarea existe
+    const checkResult = await client.query(
+      'SELECT * FROM tasks WHERE id = $1 AND deleted_at IS NULL',
+      [id]
+    );
+    
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: 'Task not found',
+          details: `No task found with ID: ${id}`
+        }
+      });
+    }
+    
+    // Soft delete (marcar como eliminado)
+    await client.query(
+      'UPDATE tasks SET deleted_at = NOW() WHERE id = $1',
+      [id]
+    );
+    
+    res.status(200).json({
+      success: true,
+      data: null,
+      message: 'Task deleted successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error deleting task:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to delete task',
+        details: error.message
+      }
+    });
+  } finally {
+    await client.end();
+  }
+});
+
+// Start server
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🌐 API endpoints:`);
+  console.log(`   GET    http://localhost:${PORT}/api/tasks`);
+  console.log(`   POST   http://localhost:${PORT}/api/tasks`);
+  console.log(`   PUT    http://localhost:${PORT}/api/tasks/:id`);
+  console.log(`   DELETE http://localhost:${PORT}/api/tasks/:id`);
+  console.log(`   GET    http://localhost:${PORT}/api/tasks/stats`);
+});
 
 module.exports = app;

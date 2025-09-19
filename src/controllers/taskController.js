@@ -1,5 +1,5 @@
-import { Task, User } from '../models/Index.js';
-import { Op } from 'sequelize';
+const { Task, User } = require('../models');
+const { Op } = require('sequelize');
 
 class TaskController {
   
