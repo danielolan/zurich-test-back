@@ -5,11 +5,9 @@ require('dotenv').config();
 
 const app = express();
 
-// Middleware básico
 app.use(cors());
 app.use(express.json());
 
-// Función para conectar a la BD
 const connectDB = () => {
   return new Client({
     host: process.env.DB_HOST || 'localhost',
@@ -20,7 +18,6 @@ const connectDB = () => {
   });
 };
 
-// Root endpoint
 app.get('/', (req, res) => {
   res.json({
     success: true,
@@ -29,7 +26,9 @@ app.get('/', (req, res) => {
     endpoints: {
       'GET /api/tasks': 'Get all tasks',
       'POST /api/tasks': 'Create new task',
-      'PUT /api/tasks/:id': 'Update task',
+      'PUT /api/tasks/:id': 'Update task (full)',
+      'PATCH /api/tasks/:id': 'Update task (partial)',
+      'PATCH /api/tasks/:id/toggle': 'Toggle task status',
       'DELETE /api/tasks/:id': 'Delete task',
       'GET /api/tasks/stats': 'Get statistics'
     },
@@ -37,7 +36,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// Health check
 app.get('/api/health', (req, res) => {
   res.json({
     success: true,
@@ -46,106 +44,11 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Get all tasks
-app.get('/api/tasks', async (req, res) => {
-  const client = connectDB();
-  
-  try {
-    await client.connect();
-    
-    const result = await client.query(`
-      SELECT 
-        t.*,
-        u.username,
-        u.first_name,
-        u.last_name
-      FROM tasks t
-      LEFT JOIN users u ON t.user_id = u.id
-      WHERE t.deleted_at IS NULL
-      ORDER BY t.created_at DESC
-    `);
-    
-    res.status(200).json({
-      success: true,
-      data: {
-        tasks: result.rows,
-        total: result.rows.length
-      },
-      message: 'Tasks retrieved successfully from database'
-    });
-    
-  } catch (error) {
-    console.error('Error fetching tasks:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to retrieve tasks',
-        details: error.message
-      }
-    });
-  } finally {
-    await client.end();
-  }
-});
-
-// Get task by ID
-app.get('/api/tasks/:id', async (req, res) => {
-  const client = connectDB();
-  const { id } = req.params;
-  
-  try {
-    await client.connect();
-    
-    const result = await client.query(`
-      SELECT 
-        t.*,
-        u.username,
-        u.first_name,
-        u.last_name
-      FROM tasks t
-      LEFT JOIN users u ON t.user_id = u.id
-      WHERE t.id = $1 AND t.deleted_at IS NULL
-    `, [id]);
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: {
-          message: 'Task not found',
-          details: `No task found with ID: ${id}`
-        }
-      });
-    }
-    
-    res.status(200).json({
-      success: true,
-      data: {
-        task: result.rows[0]
-      },
-      message: 'Task retrieved successfully'
-    });
-    
-  } catch (error) {
-    console.error('Error fetching task:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to retrieve task',
-        details: error.message
-      }
-    });
-  } finally {
-    await client.end();
-  }
-});
-
-// Get task stats
+// ⚠️ IMPORTANTE: /stats debe ir ANTES de /:id
 app.get('/api/tasks/stats', async (req, res) => {
   const client = connectDB();
-  
   try {
     await client.connect();
-    
     const result = await client.query(`
       SELECT 
         COUNT(*) as total_tasks,
@@ -157,30 +60,96 @@ app.get('/api/tasks/stats', async (req, res) => {
       FROM tasks 
       WHERE deleted_at IS NULL
     `);
-    
     res.status(200).json({
       success: true,
-      data: {
-        statistics: result.rows[0]
-      },
+      data: { statistics: result.rows[0] },
       message: 'Statistics retrieved successfully'
     });
-    
   } catch (error) {
     console.error('Error fetching stats:', error);
     res.status(500).json({
       success: false,
-      error: {
-        message: 'Failed to retrieve statistics',
-        details: error.message
-      }
+      error: { message: 'Failed to retrieve statistics', details: error.message }
     });
   } finally {
     await client.end();
   }
 });
 
-// Create new task
+app.get('/api/tasks', async (req, res) => {
+  const client = connectDB();
+  try {
+    await client.connect();
+    const result = await client.query(`
+      SELECT t.*, u.username, u.first_name, u.last_name
+      FROM tasks t
+      LEFT JOIN users u ON t.user_id = u.id
+      WHERE t.deleted_at IS NULL
+      ORDER BY t.created_at DESC
+    `);
+    res.status(200).json({
+      success: true,
+      data: {
+        tasks: result.rows,
+        total: result.rows.length,
+        pagination: {
+          currentPage: 1,
+          totalPages: 1,
+          totalItems: result.rows.length,
+          itemsPerPage: result.rows.length,
+          hasNextPage: false,
+          hasPrevPage: false
+        }
+      },
+      message: 'Tasks retrieved successfully from database'
+    });
+  } catch (error) {
+    console.error('Error fetching tasks:', error);
+    res.status(500).json({
+      success: false,
+      error: { message: 'Failed to retrieve tasks', details: error.message }
+    });
+  } finally {
+    await client.end();
+  }
+});
+
+// ⚠️ Esta ruta debe ir DESPUÉS de /stats
+app.get('/api/tasks/:id', async (req, res) => {
+  const client = connectDB();
+  const { id } = req.params;
+  try {
+    await client.connect();
+    const result = await client.query(`
+      SELECT t.*, u.username, u.first_name, u.last_name
+      FROM tasks t
+      LEFT JOIN users u ON t.user_id = u.id
+      WHERE t.id = $1 AND t.deleted_at IS NULL
+    `, [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: { message: 'Task not found', details: `No task found with ID: ${id}` }
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: { task: result.rows[0] },
+      message: 'Task retrieved successfully'
+    });
+  } catch (error) {
+    console.error('Error fetching task:', error);
+    res.status(500).json({
+      success: false,
+      error: { message: 'Failed to retrieve task', details: error.message }
+    });
+  } finally {
+    await client.end();
+  }
+});
+
 app.post('/api/tasks', async (req, res) => {
   const client = connectDB();
   const { title, description, status = 'pending', priority = 'medium', due_date, user_id } = req.body;
@@ -188,16 +157,12 @@ app.post('/api/tasks', async (req, res) => {
   if (!title) {
     return res.status(400).json({
       success: false,
-      error: {
-        message: 'Validation error',
-        details: 'Title is required'
-      }
+      error: { message: 'Validation error', details: 'Title is required' }
     });
   }
   
   try {
     await client.connect();
-    
     const result = await client.query(`
       INSERT INTO tasks (title, description, status, priority, due_date, user_id)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -206,27 +171,20 @@ app.post('/api/tasks', async (req, res) => {
     
     res.status(201).json({
       success: true,
-      data: {
-        task: result.rows[0]
-      },
+      data: { task: result.rows[0] },
       message: 'Task created successfully'
     });
-    
   } catch (error) {
     console.error('Error creating task:', error);
     res.status(500).json({
       success: false,
-      error: {
-        message: 'Failed to create task',
-        details: error.message
-      }
+      error: { message: 'Failed to create task', details: error.message }
     });
   } finally {
     await client.end();
   }
 });
 
-// Update task by ID
 app.put('/api/tasks/:id', async (req, res) => {
   const client = connectDB();
   const { id } = req.params;
@@ -235,7 +193,6 @@ app.put('/api/tasks/:id', async (req, res) => {
   try {
     await client.connect();
     
-    // Verificar que la tarea existe
     const checkResult = await client.query(
       'SELECT * FROM tasks WHERE id = $1 AND deleted_at IS NULL',
       [id]
@@ -244,14 +201,10 @@ app.put('/api/tasks/:id', async (req, res) => {
     if (checkResult.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        error: {
-          message: 'Task not found',
-          details: `No task found with ID: ${id}`
-        }
+        error: { message: 'Task not found', details: `No task found with ID: ${id}` }
       });
     }
     
-    // Construir query dinámico para actualizar solo los campos enviados
     const updateFields = [];
     const values = [];
     let paramCount = 1;
@@ -268,7 +221,6 @@ app.put('/api/tasks/:id', async (req, res) => {
       updateFields.push(`status = $${paramCount++}`);
       values.push(status);
       
-      // Si se marca como completada, agregar completed_at
       if (status === 'completed') {
         updateFields.push(`completed_at = NOW()`);
       } else if (status === 'pending') {
@@ -298,35 +250,29 @@ app.put('/api/tasks/:id', async (req, res) => {
     
     res.status(200).json({
       success: true,
-      data: {
-        task: result.rows[0]
-      },
-      message: 'Task updated successfully'
+      data: { task: result.rows[0] },
+      message: 'Task updated successfully (PUT)'
     });
-    
   } catch (error) {
     console.error('Error updating task:', error);
     res.status(500).json({
       success: false,
-      error: {
-        message: 'Failed to update task',
-        details: error.message
-      }
+      error: { message: 'Failed to update task', details: error.message }
     });
   } finally {
     await client.end();
   }
 });
 
-// Delete task by ID
-app.delete('/api/tasks/:id', async (req, res) => {
+// PATCH - Actualización parcial
+app.patch('/api/tasks/:id', async (req, res) => {
   const client = connectDB();
   const { id } = req.params;
+  const updates = req.body;
   
   try {
     await client.connect();
     
-    // Verificar que la tarea existe
     const checkResult = await client.query(
       'SELECT * FROM tasks WHERE id = $1 AND deleted_at IS NULL',
       [id]
@@ -335,14 +281,135 @@ app.delete('/api/tasks/:id', async (req, res) => {
     if (checkResult.rows.length === 0) {
       return res.status(404).json({
         success: false,
+        error: { message: 'Task not found', details: `No task found with ID: ${id}` }
+      });
+    }
+    
+    const updateFields = [];
+    const values = [];
+    let paramCount = 1;
+    
+    Object.keys(updates).forEach(field => {
+      if (['title', 'description', 'status', 'priority', 'due_date'].includes(field)) {
+        updateFields.push(`${field} = $${paramCount++}`);
+        values.push(updates[field]);
+        
+        if (field === 'status') {
+          if (updates[field] === 'completed') {
+            updateFields.push(`completed_at = NOW()`);
+          } else if (updates[field] === 'pending') {
+            updateFields.push(`completed_at = NULL`);
+          }
+        }
+      }
+    });
+    
+    if (updateFields.length === 0) {
+      return res.status(400).json({
+        success: false,
         error: {
-          message: 'Task not found',
-          details: `No task found with ID: ${id}`
+          message: 'No valid fields to update',
+          details: 'Provide at least one field: title, description, status, priority, due_date'
         }
       });
     }
     
-    // Soft delete (marcar como eliminado)
+    updateFields.push(`updated_at = NOW()`);
+    values.push(id);
+    
+    const query = `
+      UPDATE tasks 
+      SET ${updateFields.join(', ')} 
+      WHERE id = $${paramCount} AND deleted_at IS NULL
+      RETURNING *
+    `;
+    
+    const result = await client.query(query, values);
+    
+    res.status(200).json({
+      success: true,
+      data: { task: result.rows[0] },
+      message: 'Task updated successfully (PATCH)'
+    });
+  } catch (error) {
+    console.error('Error patching task:', error);
+    res.status(500).json({
+      success: false,
+      error: { message: 'Failed to update task', details: error.message }
+    });
+  } finally {
+    await client.end();
+  }
+});
+
+// PATCH Toggle status
+app.patch('/api/tasks/:id/toggle', async (req, res) => {
+  const client = connectDB();
+  const { id } = req.params;
+  
+  try {
+    await client.connect();
+    
+    const currentTask = await client.query(
+      'SELECT status FROM tasks WHERE id = $1 AND deleted_at IS NULL',
+      [id]
+    );
+    
+    if (currentTask.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: { message: 'Task not found', details: `No task found with ID: ${id}` }
+      });
+    }
+    
+    const currentStatus = currentTask.rows[0].status;
+    const newStatus = currentStatus === 'pending' ? 'completed' : 'pending';
+    const completedAt = newStatus === 'completed' ? 'NOW()' : 'NULL';
+    
+    const result = await client.query(`
+      UPDATE tasks 
+      SET status = $1, 
+          completed_at = ${completedAt}, 
+          updated_at = NOW()
+      WHERE id = $2 AND deleted_at IS NULL
+      RETURNING *
+    `, [newStatus, id]);
+    
+    res.status(200).json({
+      success: true,
+      data: { task: result.rows[0] },
+      message: `Task status toggled to ${newStatus}`
+    });
+  } catch (error) {
+    console.error('Error toggling task:', error);
+    res.status(500).json({
+      success: false,
+      error: { message: 'Failed to toggle task status', details: error.message }
+    });
+  } finally {
+    await client.end();
+  }
+});
+
+app.delete('/api/tasks/:id', async (req, res) => {
+  const client = connectDB();
+  const { id } = req.params;
+  
+  try {
+    await client.connect();
+    
+    const checkResult = await client.query(
+      'SELECT * FROM tasks WHERE id = $1 AND deleted_at IS NULL',
+      [id]
+    );
+    
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: { message: 'Task not found', details: `No task found with ID: ${id}` }
+      });
+    }
+    
     await client.query(
       'UPDATE tasks SET deleted_at = NOW() WHERE id = $1',
       [id]
@@ -353,22 +420,17 @@ app.delete('/api/tasks/:id', async (req, res) => {
       data: null,
       message: 'Task deleted successfully'
     });
-    
   } catch (error) {
     console.error('Error deleting task:', error);
     res.status(500).json({
       success: false,
-      error: {
-        message: 'Failed to delete task',
-        details: error.message
-      }
+      error: { message: 'Failed to delete task', details: error.message }
     });
   } finally {
     await client.end();
   }
 });
 
-// Start server
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
@@ -376,6 +438,8 @@ app.listen(PORT, () => {
   console.log(`   GET    http://localhost:${PORT}/api/tasks`);
   console.log(`   POST   http://localhost:${PORT}/api/tasks`);
   console.log(`   PUT    http://localhost:${PORT}/api/tasks/:id`);
+  console.log(`   PATCH  http://localhost:${PORT}/api/tasks/:id`);
+  console.log(`   PATCH  http://localhost:${PORT}/api/tasks/:id/toggle`);
   console.log(`   DELETE http://localhost:${PORT}/api/tasks/:id`);
   console.log(`   GET    http://localhost:${PORT}/api/tasks/stats`);
 });
